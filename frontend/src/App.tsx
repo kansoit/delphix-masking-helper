@@ -8,13 +8,15 @@ import { FrameworkTester } from '@/components/FrameworkTester'
 import { DomainEditor } from '@/components/DomainEditor'
 import { ClassifierEditor } from '@/components/ClassifierEditor'
 import { ProfileSetEditor } from '@/components/ProfileSetEditor'
+import { HookEditor } from '@/components/HookEditor'
+import { NewHookWizard } from '@/components/HookWizard'
 import { Settings } from '@/components/Settings'
 import { SetupNeeded } from '@/components/SetupNeeded'
 import { isLocalePref, readStoredPref, resolveLocale, storePref } from '@/lib/i18n'
 import { I18nProvider } from '@/lib/i18n/I18nProvider'
 import { parseConfig, refreshAlgorithms } from '@/lib/algorithms'
 import { useResumeSync } from '@/lib/sync-job'
-import type { Algorithm, Classifier, Domain, Framework, LocalePref, ProfileSet, View } from '@/types'
+import type { Algorithm, Classifier, Domain, Framework, Hook, LocalePref, ProfileSet, View } from '@/types'
 
 interface TesterState {
   framework: Framework
@@ -38,6 +40,7 @@ export default function App() {
   const [classifier, setClassifier] = useState<Classifier | null>(null)
   // And again for the profile sets.
   const [profileSet, setProfileSet] = useState<ProfileSet | null>(null)
+  const [hook, setHook] = useState<Hook | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   // Set by "New algorithm": the home screen then says to pick a framework, which the sidebar
   // has just opened. Cleared on the next trip home, so the hint does not outlive the errand.
@@ -163,6 +166,23 @@ export default function App() {
     setSidebarOpen(false)
   }
 
+  const selectHook = (h: Hook) => {
+    setHookTab(undefined)
+    setHook(h)
+    setView('hook')
+    setSidebarOpen(false)
+  }
+
+  const [hookWizard, setHookWizard] = useState(false)
+  // A hook the wizard just wrote opens on its test run, with the variables it reads.
+  const [hookTab, setHookTab] = useState<'test' | undefined>(undefined)
+
+  const newHook = () => {
+    setHook(null)
+    setView('hook')
+    setSidebarOpen(false)
+  }
+
   const showHome = () => {
     setView('welcome'); setTester(null); setDomain(null); setClassifier(null); setProfileSet(null)
     setSidebarOpen(false)
@@ -183,6 +203,7 @@ export default function App() {
     activeDomainId: view === 'domain' ? (domain?.id ?? null) : null,
     activeClassifierId: view === 'classifier' ? (classifier?.id ?? null) : null,
     activeProfileSetId: view === 'profileSet' ? (profileSet?.id ?? null) : null,
+    activeHookId: view === 'hook' ? (hook?.id ?? null) : null,
     onSelectFramework: selectFramework,
     onSelectAlgorithm: selectAlgorithm,
     onNewAlgorithm: newAlgorithm,
@@ -192,6 +213,9 @@ export default function App() {
     onNewClassifier: newClassifier,
     onSelectProfileSet: selectProfileSet,
     onNewProfileSet: newProfileSet,
+    onSelectHook: selectHook,
+    onNewHook: newHook,
+    onHookWizard: () => setHookWizard(true),
     onOpenSettings: showSettings,
     onGoHome: showHome,
     localePref,
@@ -281,6 +305,18 @@ export default function App() {
               onCreated={selectProfileSet}
             />
           )}
+          {view === 'hook' && (
+            <HookEditor
+              key={hook ? `hook:${hook.id}` : 'hook:new'}
+              hook={hook}
+              onToggleSidebar={toggleSidebar}
+              onDeleted={showHome}
+              onCreated={selectHook}
+              onOpenSettings={() => showSettings()}
+              initialTab={hookTab}
+            />
+          )}
+          {hookWizard && <NewHookWizard onClose={() => setHookWizard(false)} onCreated={h => { setHookWizard(false); selectHook(h); setHookTab('test') }} />}
           {view === 'settings' && (
             <Settings
               key={settingsTab ?? 'default'}

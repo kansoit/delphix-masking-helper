@@ -2,7 +2,7 @@ import type {
   Algorithm, AiStatus, AppConfig, ChatHandlers, ChatMessage, Classifier, ClassifierCatalog,
   ClassifierFrameworkName, ClassifierReview, ClassifierTestField, ClassifierTestResult,
   PresetConflict, PresetPack, ProfileSet, ProfileSetPreset,
-  BuiltinReferences, Domain, EngineReferences, Framework, JsonSchema, MaskResult, ServerFile, VersionInfo,
+  BuiltinReferences, Domain, EngineReferences, Framework, Hook, HookRuntime, HookShell, HookVariable, HookWizardOptions, JsonSchema, MaskResult, ServerFile, VersionInfo,
 } from '@/types'
 import type {
   AlgorithmExportResult, ClassifierExportResult, DomainExportResult, EngineImportResult, ImportProgress,
@@ -138,6 +138,9 @@ async function streamJob<T>(url: string, init: RequestInit, events: SyncJobEvent
   if (!result) throw new Error('The job stopped before it finished.')
   return result
 }
+
+/** Where the integration points: one Continuous Compliance engine, or Data Control Tower. */
+export type DelphixTarget = 'engine' | 'dct'
 
 export const api = {
   /** Which build this is. Read from the git tag on the server, never from the network. */
@@ -324,6 +327,68 @@ export const api = {
    */
   delphixExportProfileSet: (id: number, events: SyncJobEvents) =>
     streamJob<ProfileSetExportResult>(`/api/delphix/profile-sets/export/${id}`, { method: 'POST' }, events),
+  // ── Hooks ──────────────────────────────────────────────────────────────────
+
+  getHooks: () => request<Hook[]>('/api/hooks'),
+
+  getHookRuntime: () => request<HookRuntime>('/api/hooks/runtime'),
+
+  createHook: (body: Partial<Hook> & { name: string }) =>
+    request<Hook>('/api/hooks', { method: 'POST', ...json(body) }),
+
+  updateHook: (id: number, patch: Partial<Hook>) =>
+    request<Hook>(`/api/hooks/${id}`, { method: 'PUT', ...json(patch) }),
+
+  deleteHook: (id: number) =>
+    request<{ ok: boolean }>(`/api/hooks/${id}`, { method: 'DELETE' }),
+
+  /** Sends one hook to Data Control Tower as a hook template. */
+  delphixExportHook: (id: number) =>
+    request<{ mode: 'created' | 'updated'; name: string; id: string }>(`/api/delphix/hooks/export/${id}`, { method: 'POST' }),
+
+  /**
+   * Runs a script on this machine and streams what it prints. Aborting the signal stops it — the
+   * server kills the run when the page stops listening.
+   */
+  runHook: async (
+    body: { shell: HookShell; command: string; env: HookVariable[]; timeoutSec?: number },
+    on: {
+      start?: (p: { interpreter: string }) => void
+      out: (p: { stream: 'stdout' | 'stderr'; text: string }) => void
+      exit: (p: { code: number | null; signal: string | null; ms: number; timedOut: boolean; truncated: boolean }) => void
+      error: (p: { code: string; shell?: string; message?: string }) => void
+    },
+    signal?: AbortSignal,
+  ) => {
+    const res = await fetch('/api/hooks/run', { method: 'POST', signal, ...json(body) })
+    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
+    await readEvents(res.body, (event, payload) => {
+      if (event === 'start') on.start?.(payload)
+      else if (event === 'out') on.out(payload)
+      else if (event === 'exit') on.exit(payload)
+      else if (event === 'error') on.error(payload)
+    })
+  },
+
+  /** What the hook wizard picks from: the DCT the integration points at, its policies and orchestrators. */
+  getHookWizardOptions: () => request<HookWizardOptions>('/api/hooks/wizard-options'),
+
+  /** Asks the assistant about the hook on screen; the reply streams in pieces. */
+  streamHookAssist: async (
+    body: { messages: ChatMessage[]; hook: Pick<Hook, 'name' | 'description' | 'shell' | 'command' | 'credentials'> },
+    onDelta: (delta: string) => void,
+    signal: AbortSignal,
+  ) => {
+    const res = await fetch('/api/hooks/assist', { method: 'POST', signal, ...json(body) })
+    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
+    let failure: string | null = null
+    await readEvents(res.body, (event, payload) => {
+      if (event === 'delta') onDelta(payload.delta)
+      else if (event === 'error') failure = String(payload.message ?? '')
+    })
+    if (failure !== null) throw new Error(failure || 'The AI provider did not answer.')
+  },
+
   // ── Pre-configured profile sets ────────────────────────────────────────────
 
   getPresets: () =>
@@ -345,6 +410,12 @@ export const api = {
     }>(`/api/presets/${encodeURIComponent(id)}/load`, { method: 'POST', ...json({ overwrite, pack }) }),
 
   /** Removes what the preset brought, except what something else here still uses. */
+  /** Takes a preset's zip copied here by hand (its data or its package, from the release). */
+  importPresetPackage: (file: Blob) =>
+    request<{ id: string; files: number }>('/api/presets/import', {
+      method: 'POST', headers: { 'Content-Type': 'application/zip' }, body: file,
+    }),
+
   unloadPreset: (id: string) =>
     request<{ removed: PresetConflict[]; kept: PresetConflict[] }>(
       `/api/presets/${encodeURIComponent(id)}/unload`, { method: 'POST' }),
@@ -352,6 +423,9 @@ export const api = {
   /** A link rather than a request: the browser downloads the PDF itself. */
   presetDocUrl: (id: string, locale: string) =>
     `/api/presets/${encodeURIComponent(id)}/doc?locale=${encodeURIComponent(locale)}`,
+
+  /** The zip that loads the preset into Delphix without this tool: docs, import scripts and data. */
+  presetBundleUrl: (id: string) => `/api/presets/${encodeURIComponent(id)}/bundle`,
 
   /** Sends the classifier and, first, its domain (with the domain's algorithms) and its list files. */
   delphixExportClassifier: (id: number, events: SyncJobEvents) =>
@@ -371,7 +445,9 @@ export const api = {
     request<{ configured: boolean; ok: boolean; error?: string; apiRoot?: string }>('/api/delphix/status'),
 
   /** Probes credentials straight from the form, before they are saved. */
-  delphixTest: (body: { baseUrl: string; username: string; password: string; allowSelfSigned: boolean }) =>
+  delphixTest: (body: {
+    target: DelphixTarget; baseUrl: string; username: string; password: string; apiKey: string; allowSelfSigned: boolean
+  }) =>
     request<{ configured: boolean; ok: boolean; error?: string; apiRoot?: string }>('/api/delphix/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

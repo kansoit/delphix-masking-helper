@@ -45,7 +45,7 @@ export interface MaskResult {
   error?: string
 }
 
-export type View = 'welcome' | 'tester' | 'domain' | 'classifier' | 'profileSet' | 'settings'
+export type View = 'welcome' | 'tester' | 'domain' | 'classifier' | 'profileSet' | 'hook' | 'settings'
 
 export interface ServerFile {
   name: string
@@ -126,11 +126,19 @@ export interface PresetCounts { classifiers: number; domains: number; algorithms
  * A profile set shipped with the tool, together with everything it leans on — its classifiers,
  * their domains, those domains' algorithms and the files they read. Loaded from Settings.
  */
+/** The regions pre-configured discovery policies are grouped by, in display order. */
+export const PRESET_REGIONS = ['north-america', 'central-america', 'caribbean', 'south-america', 'europe', 'africa', 'asia', 'oceania'] as const
+export type PresetRegion = typeof PRESET_REGIONS[number]
+
 export interface ProfileSetPreset {
   id: string
   version: number | null
   /** The day that version was built, `YYYY-MM-DD`; null for a preset that does not say. */
   versionDate: string | null
+  /** Where the law applies, for grouping the list; null when the preset does not say. */
+  region: PresetRegion | null
+  /** ISO 3166 code of the country, when the preset says. */
+  country: string | null
   /** By locale; `en` is always present. */
   name: Partial<Record<Locale, string>>
   summary: Partial<Record<Locale, string>>
@@ -143,6 +151,12 @@ export interface ProfileSetPreset {
   loaded: { version: number; pack: PresetPack; loaded_at: string } | null
   /** Why it cannot be loaded; empty when it can. */
   problems: string[]
+  /**
+   * Whether its files are on this machine. `local`: in the checkout; `downloaded`: brought down
+   * already; `outdated`: an older version was; `remote`: not yet. `size` is what a load would still
+   * download, `total` everything it has (PDFs included), in bytes; null where it is all local.
+   */
+  download: { state: 'local' | 'downloaded' | 'outdated' | 'remote'; size: number; total: number | null }
 }
 
 /** Something already here that loading a preset would overwrite or remove. */
@@ -356,4 +370,53 @@ export interface ChatHandlers {
   onSaved: (saved: AssistantAlgorithm) => void
   onSaveError: (message: string) => void
   onError: (message: string) => void
+}
+
+/** The shells DCT runs a hook with: bash, sh, expect, PowerShell, delegated PowerShell. */
+export type HookShell = 'bash' | 'shell' | 'expect' | 'ps' | 'psd'
+
+/** A hook saved here: a script, what it is for, and how to try it. */
+export interface Hook {
+  id: number
+  name: string
+  description: string
+  shell: HookShell
+  command: string
+  /** Base names of the credential variables DCT sets (<BASE>_USER, <BASE>_PASSWORD…). */
+  credentials: string[]
+  /** Test values for a run on this machine, credentials' included — kept here only, never sent to DCT. */
+  variables: HookVariable[]
+  /** The hook wizard's plan, as JSON, when the wizard wrote the script. */
+  template: string | null
+  delphix_id: string | null
+  delphix_origin: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** A test value for a run on this machine. */
+export interface HookVariable {
+  name: string
+  value: string
+  /** A credential's part (<BASE>_PASSWORD…): shown masked. */
+  secret?: boolean
+  /** Takes the API key of the Delphix integration when the hook runs, instead of a value. */
+  fromSettings?: boolean
+}
+
+/** What the hook wizard fills its fields from. Lists are empty without a DCT integration. */
+export interface HookWizardOptions {
+  target: 'dct' | 'engine' | null
+  dctUrl: string
+  insecure: boolean
+  policies: Array<{ id: string; name: string }>
+  orchestrators: Array<{ id: string; name: string }>
+  error?: string
+}
+
+/** Which interpreters this machine has, by shell; null where a shell cannot run here. */
+export interface HookRuntime {
+  platform: string
+  native: HookShell
+  shells: Record<HookShell, string | null>
 }

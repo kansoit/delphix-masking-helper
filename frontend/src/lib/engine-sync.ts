@@ -1,6 +1,7 @@
 import { toast } from 'sonner'
 import { refreshAlgorithms } from '@/lib/algorithms'
 import { refreshDomains } from '@/lib/domains'
+import { refreshHooks } from '@/lib/hooks'
 import { refreshClassifiers } from '@/lib/classifiers'
 import { refreshProfileSets } from '@/lib/profile-sets'
 import type { useT } from '@/lib/i18n'
@@ -25,6 +26,9 @@ export interface EngineImportResult {
   downloaded: string[]
   /** Files still to be copied by hand — the engine offers no download for them. */
   needsFiles: Array<{ name: string; files: string[] }>
+  /** DCT's hook templates, brought down as hooks — only with DCT as the destination. */
+  hooks?: string[]
+  hookError?: string | null
 }
 
 /**
@@ -55,9 +59,15 @@ export interface SyncExportResult {
   descriptionCut: string[]
 }
 
+/**
+ * What sending did to one object there. `unchanged` is Data Control Tower's: an object that is
+ * already as sent is not written again. `engine-owned` is one of DCT's built-ins, left as it is.
+ */
+export type SyncMode = 'created' | 'updated' | 'unchanged' | 'engine-owned'
+
 /** What sending one algorithm did, and the algorithms it references that went first. */
 export interface AlgorithmExportResult extends EngineExportResult {
-  mode: 'created' | 'updated'
+  mode: SyncMode
   name: string
   engine: string
   /** Sent under another name than the row's here: a copy, or a local rename the engine refuses. */
@@ -66,14 +76,14 @@ export interface AlgorithmExportResult extends EngineExportResult {
 
 /** What sending one domain did, and the algorithms it took along. */
 export interface DomainExportResult extends EngineExportResult {
-  mode: 'created' | 'updated'
+  mode: SyncMode
   name: string
   engine: string
 }
 
 /** What sending one classifier did, the domain it needed included. */
 export interface ClassifierExportResult extends DomainExportResult {
-  domain: { mode: 'created' | 'updated'; name: string } | null
+  domain: { mode: SyncMode; name: string } | null
 }
 
 /** What any sync job ends with; the job's kind says which. */
@@ -82,16 +92,16 @@ export type SyncJobResult =
 
 /** What sending one profile set did: the set, its classifiers, and what they dragged along. */
 export interface ProfileSetExportResult extends EngineExportResult {
-  mode: 'created' | 'updated'
+  mode: SyncMode
   name: string
   engine: string
-  classifiers: Array<{ name: string; mode: 'created' | 'updated' }>
+  classifiers: Array<{ name: string; mode: SyncMode }>
   descriptionCut: string[]
 }
 
 /** What a push sent ahead of the object itself. */
 export interface EngineExportResult {
-  sent: Array<{ name: string; mode: 'created' | 'updated' }>
+  sent: Array<{ name: string; mode: SyncMode }>
   /** References left as they are: the engine's own plugin instances, or names only it holds. */
   skipped: Array<{ name: string; reason: 'engine-owned' | 'not-local' }>
   uploaded: string[]
@@ -101,6 +111,8 @@ const listed = (names: string[]) => ({ n: names.length, names: names.join(', ') 
 
 /** Tells what came along with an import, and what could not come. */
 export function announceImport(t: Translate, out: EngineImportResult) {
+  if (out.hooks?.length) toast.success(t('sync.importedHooks', listed(out.hooks)))
+  if (out.hookError) toast.warning(t('sync.hooksFailed', { error: out.hookError }))
   if (out.related.classifiers.length) toast.success(t('sync.importedClassifiers', listed(out.related.classifiers)))
   if (out.related.domains.length) toast.success(t('sync.importedDomains', listed(out.related.domains)))
   if (out.related.algorithms.length) toast.success(t('sync.importedAlgorithms', listed(out.related.algorithms)))
@@ -132,12 +144,16 @@ export function announceImport(t: Translate, out: EngineImportResult) {
  * of them, because the one that is skipped is invisible until someone is confused by it.
  */
 export function refreshAfterImport() {
-  return Promise.all([refreshProfileSets(), refreshClassifiers(), refreshDomains(), refreshAlgorithms()])
+  return Promise.all([refreshProfileSets(), refreshClassifiers(), refreshDomains(), refreshAlgorithms(), refreshHooks()])
 }
 
 /** Tells what went to the engine ahead of the object that references it. */
 export function announceExport(t: Translate, out: EngineExportResult) {
-  if (out.sent.length) toast.success(t('sync.sentAlgorithms', listed(out.sent.map(a => a.name))))
+  // Data Control Tower is not written to when an object is already as sent; those are only counted.
+  const written = out.sent.filter(a => a.mode !== 'unchanged')
+  const unchanged = out.sent.length - written.length
+  if (written.length) toast.success(t('sync.sentAlgorithms', listed(written.map(a => a.name))))
+  if (unchanged) toast.info(t('sync.unchanged', { n: unchanged }))
   if (out.uploaded.length) {
     toast.success(t('sync.uploadedFiles', { n: out.uploaded.length, files: out.uploaded.join(', ') }))
   }
